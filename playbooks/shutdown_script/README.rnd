@@ -1,0 +1,5 @@
+The file will be used before a shutdown of the machine
+
+If a NAP instance is shutdown then we need to run a CI/CD pipeline to remove its public ip address from F5 CD DNS LB.
+
+A webhook is used to run the Pipeline

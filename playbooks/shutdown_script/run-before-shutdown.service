@@ -1,0 +1,14 @@
+[Unit]
+Description=Run my custom script at shutdown
+DefaultDependencies=no
+Conflicts=reboot.target
+Before=poweroff.target halt.target shutdown.target
+Requires=poweroff.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/centos/shutdown_script.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=shutdown.target

@@ -1,0 +1,90 @@
+image: alpine:latest
+
+variables:
+    var_id: "harryk"                       # will be used to retrieve some resources
+    var_region: "eu-west-3"
+    var_s3_bucket: "harryk-bucket"
+
+
+stages:
+    - Setup_NAP
+    - Setup_F5CS_DNSLB
+
+default:
+  before_script:
+    - apk add ansible py3-boto3 aws-cli openssh-client
+
+
+    ##
+    ## Ansible Vault will be used to decrypt F5CS user password
+    ## Gitlab does not provide enough security to keep the pwd into the settings
+    ## With Vault we do not need to enter the password in clear anywhere into the gitlab settings
+    ##
+    - echo "default" > /root/.vault_pass.txt
+
+    - ls -la /root/.vault_pass.txt
+
+    - cat /root/.vault_pass.txt
+
+    ##
+    ## Gitlab triggers an error when we try to use a file ansible.cfg from the repository.
+    ## So we need to get ansible.cfg from an external repo.
+    ## I use a private AWS S3 for that matter.
+    - aws s3api get-object --bucket ${var_s3_bucket} --key "ansible.cfg" /root/.ansible.cfg
+
+    - ls -la  /root/
+
+    - cat /root/.ansible.cfg
+
+    - ansible --version
+
+
+    - ansible-galaxy collection install amazon.aws community.aws
+
+
+    ##
+    ## Run ssh-agent (inside the build environment)
+    ##
+    - eval $(ssh-agent -s)
+
+
+  ##
+  ## Create the SSH directory and give it the right permissions
+  ##
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+
+  ##
+  ## Private Key will be needed for Ansible to use SSH en copy files onto remote NAP servers
+  ## Gitlab does not provide enough security to keep that sensitive key into the settings
+  ## So I use a private AWS S3 for that matter.
+  ##
+    - aws s3api get-object --bucket ${var_s3_bucket} --key "HarryK_Key_Pair.pem" private_key.pem
+
+    - chmod 400 ./private_key.pem
+
+    - ssh-add ./private_key.pem
+
+
+  ##
+  ## You can optionally disable host key checking. Be aware that by adding that
+  ## you are suspectible to man-in-the-middle attacks.
+  ## WARNING: Use this only with the Docker executor, if you use it with shell
+  ## you will overwrite your user's SSH config.
+  ##
+  ##  - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+
+
+Setup_NAP:
+    stage: Setup_NAP
+    script:
+        - aws ec2 describe-instances --region ${var_region} --filters Name=tag-value,Values=${var_id}_NAP Name=instance-state-name,Values=running --query 'Reservations[*].Instances[*].{IPpub:PublicIpAddress}' --output text > hosts
+        - cat hosts
+        - ansible-playbook -i ./hosts --key-file "./private_key.pem"  playbooks/setup_nap.yml -vvv
+
+
+
+Setup_F5CS_DNSLB:
+    stage: Setup_F5CS_DNSLB
+    script:
+        - ansible-playbook -e region=${var_region} -e extra_cs_hostname=api.cloudservices.f5.com -e extra_cs_api_version=v1 -e extra_app_name=harryk_demo -e extra_app_gslb_location=eu -e extra_app_domain=harrykdemo.com playbooks/create_dns_lb_f5CS.yml

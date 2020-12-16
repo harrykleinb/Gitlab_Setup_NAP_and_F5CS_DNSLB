@@ -1,0 +1,8 @@
+{
+    "monitor_{{ extra_app_name}}": {
+        "display_name": "monitor_{{ extra_app_name}}",
+        "monitor_type": "http_advanced",
+        "send": "GET / HTTP/1.0\\r\\nHOST: {{ extra_app_name}}.{{ extra_app_domain }}\\r\\n\\r\\n",
+        "target_port": 80
+    }
+}

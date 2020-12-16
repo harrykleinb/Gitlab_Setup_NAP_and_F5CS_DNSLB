@@ -1,0 +1,203 @@
+---
+
+- hosts: localhost
+  connection: local
+  gather_facts: False
+
+  vars:
+    username: h.kleinbourg@f5.com
+    F5CS_pwd: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          38343536386361373237623636373465373465663031383137353963306664363633323930393466
+          3463656464363635643732373235336661313663663939390a326438323136643337653563353233
+          39303434633936366566356232626538346562393430633832643333353830353730356465623434
+          3265393964643335330a333132313363383431613761396634396663313033386562663561646465
+          3730
+
+  tasks:
+
+#Retrieve the public IP addresses of the running NAP instances for adding them into the configuration of the DNL LB F5 CS.
+
+    - name: INIT var_instances_Public_IPs
+      set_fact:
+        var_instances_Public_IPs: []
+
+
+    - name: Get NAP EC2 Instances list and Properties                #will be used to retrieve the Public IP address of each NAP running into AWS
+      community.aws.ec2_instance_info:
+        region: eu-west-3
+        filters:
+          instance-state-name: [ "running"]
+          "tag:Name": harryk_NAP
+        validate_certs: no
+      register: var_nap_ec2_instances
+
+    - debug:
+        var: var_nap_ec2_instances
+
+
+    - name: Get Public IP Address of NAP instances and build a list              #will be used to create the DNS LB in F5 CS
+      set_fact:
+        var_instances_Public_IPs: "{{ var_instances_Public_IPs + [item.public_ip_address] }}"
+      loop: "{{ var_nap_ec2_instances.instances }}"
+
+
+
+    - debug:
+        var: var_instances_Public_IPs
+
+
+#Login into F5 CS and configure the DNS LB service
+
+    - name: login - retrieve F5CS ACCESS_TOKEN + REFRESH_TOKEN
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-auth/login"
+        method: POST
+        headers:
+          Content-Type: application/json
+        body: "{{ lookup('template','cs_login.json') }}"
+        body_format: json
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_login
+
+
+    - name: Account details - retrieve F5CS ACCOUNT_ID
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-account/user"
+        method: GET
+        headers:
+            Accept: application/json
+            Authorization: "Bearer {{cs_login.json.access_token}}"
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_account
+
+
+    - name: GET F5CS DNS LB subscriptions
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-subscription/subscriptions?account_id={{ cs_account.json.primary_account_id }}&service_type=gslb"
+        method: GET
+        headers:
+            Accept: application/json
+            Authorization: "Bearer {{cs_login.json.access_token}}"
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_subscriptions
+
+
+    - debug:
+        var: cs_subscriptions
+
+    - name: Create Config Blocks for F5CS DNS LB
+      set_fact:
+        var_new_lbr: "{{ lookup('template', 'cs_dns_lb_object_lbr.json') }}"
+        var_new_monitor: "{{ lookup('template', 'cs_dns_lb_object_monitor.json') }}"
+        var_new_pool: "{{ lookup('template', 'cs_dns_lb_object_pool.json') }}"
+        var_new_virtual_server: "{{ lookup('template', 'cs_dns_lb_object_vs.json') }}"
+
+
+    - name: INIT var_subscription_id  #will be used to verify whether configuration already exists, hence whether a POST or a PUT must be used.
+      set_fact:
+        var_subscription_id: "none"
+
+
+    - name: Retire Existing Bad Subscriptions
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-subscription/subscriptions/{{ item.subscription_id }}/retire"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{cs_login.json.access_token}}"
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      loop: "{{ cs_subscriptions.json.subscriptions }}"
+      when: item.configuration.gslb_service is not defined
+
+
+    - name: SET var_subscription_id  #set the var if configurartion already exists for the domain. The vars will be used in case of config update.
+      set_fact:
+        var_subscription_id: "{{ item.subscription_id }}"
+        var_current_configuration: "{{ item.configuration }}"
+      loop: "{{ cs_subscriptions.json.subscriptions }}"
+      when: item.configuration.gslb_service.zone == extra_app_domain
+
+
+    - name: CREATE Config for F5 CS DNS LB Service
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-subscription/subscriptions"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{cs_login.json.access_token}}"
+        body: "{{ lookup('template', 'cs_dns_lb_create.json') }}"
+        body_format: json
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_subscription_create
+      when: var_subscription_id == 'none'
+
+
+    - name: UPDATE Config for F5 CS DNS LB Service
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-subscription/subscriptions/{{ var_subscription_id }}"
+        method: PUT
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{cs_login.json.access_token}}"
+        body: "{{ lookup('template', 'cs_dns_lb_update.json') }}"
+        body_format: json
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_subscription_update
+      when: var_subscription_id != 'none'
+
+
+
+    - name: INIT cs_subscription
+      set_fact:
+        cs_subscription: "{{ cs_subscription_create }}"
+      when: cs_subscription_create.skipped is undefined
+
+
+    - name: INIT cs_subscription
+      set_fact:
+        cs_subscription: "{{ cs_subscription_update }}"
+      when: cs_subscription_update.skipped is undefined
+
+
+    - name: Activate GSLB Subscription
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-subscription/subscriptions/{{ cs_subscription.json.subscription_id }}/activate"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ cs_login.json.access_token }}"
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_activation
+
+    - name: GET GSLB status
+      uri:
+        url: "https://{{ extra_cs_hostname }}/{{ extra_cs_api_version }}/svc-subscription/subscriptions/{{ cs_subscription.json.subscription_id }}/status"
+        method: GET
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ cs_login.json.access_token }}"
+        timeout: 60
+        status_code: 200, 202
+        validate_certs: false
+      register: cs_status
+      until: "cs_status.json.service_state == 'DEPLOYED'"
+      retries: 20
+      delay: 15
+
+    - debug:
+        var: cs_status.json

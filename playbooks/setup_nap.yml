@@ -1,0 +1,77 @@
+---
+- hosts: all
+  remote_user: centos
+  gather_facts: False
+
+  tasks:
+
+    - name: Copy NAP config files
+      copy:
+        src: ./config/{{item}}
+        dest: /etc/nginx/
+      with_items:
+        ['nginx.conf','log-policy.json','security-policy.json','config.yaml']
+      become: yes
+      become_user: root
+      become_method: su
+
+    - name: Copy Shutdown Script in systemd directory
+      copy:
+        src: ./shutdown_script/shutdown_script.sh
+        dest: /home/centos/
+      become: yes
+      become_user: root
+      become_method: su
+
+    - name: Provide executable permission to the shutdown script
+      command: chmod u+x /home/centos/shutdown_script.sh
+      become: yes
+      become_user: root
+      become_method: su
+
+    - name: Create unit file to run the shutdown script with systemd right before shutdown of the instance
+      copy:
+        src: ./shutdown_script/run-before-shutdown.service
+        dest: /etc/systemd/system/
+      become: yes
+      become_user: root
+      become_method: su
+
+    - name: Refresh the systemd configuration files
+      command: systemctl daemon-reload
+      become: yes
+      become_user: root
+      become_method: su
+
+    - name: Enable the script to automatically start at next boot
+      command: systemctl enable run-before-shutdown.service
+      become: yes
+      become_user: root
+      become_method: su
+
+
+
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+      become: yes
+      become_user: root
+      become_method: su
+      retries: 5
+      delay: 20
+      register: result
+      until: result is not failed
+
+
+    - name: restart nginx-asg-sync
+      service:
+        name: nginx-asg-sync
+        state: restarted
+      become: yes
+      become_user: root
+      become_method: su
+      retries: 5
+      delay: 20
+      register: result
+      until: result is not failed

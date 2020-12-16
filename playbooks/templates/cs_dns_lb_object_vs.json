@@ -1,0 +1,10 @@
+{
+    {%- for public_ip in var_instances_Public_IPs -%}
+    "ipEndpoints_Global_app_instance_{{ loop.index }}": {
+        "address": "{{ public_ip }}",
+        "display_name": "Global app instance {{ loop.index }}",
+        "monitor": "monitor_{{ extra_app_name }}",
+        "port": 80
+    }{%- if not loop.last -%},{% endif %}
+    {%- endfor -%}
+}
